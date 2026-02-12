@@ -5,12 +5,14 @@ from pytomography.transforms import Transform
 from pytomography.transforms.shared import RotationTransform
 from pytomography.metadata.SPECT import SPECTObjectMeta, SPECTProjMeta
 from pytomography.utils import pad_object, unpad_object, pad_proj, unpad_proj, rotate_detector_z
+from pytomography.utils.scatter_esse import ESSEScatterModel
 import numpy as np
 from ..system_matrix import SystemMatrix
 from pytomography.utils import simind_mc
 from copy import copy
 from typing import Sequence
 import shutil
+
 
 class SPECTSystemMatrix(SystemMatrix):
     r"""System matrix for SPECT imaging implemented using the rotate+sum technique.
@@ -28,11 +30,13 @@ class SPECTSystemMatrix(SystemMatrix):
         proj2proj_transforms: list[Transform],
         object_meta: SPECTObjectMeta,
         proj_meta: SPECTProjMeta,
+        scatter_model: ESSEScatterModel | None = None,
         object_initial_based_on_camera_path: bool = False
     ) -> None:
         super(SPECTSystemMatrix, self).__init__(object_meta, proj_meta, obj2obj_transforms, proj2proj_transforms)
         self.object_initial_based_on_camera_path = object_initial_based_on_camera_path
         self.rotation_transform = RotationTransform()
+        self.scatter_model = scatter_model
         
     def _get_object_initial(self, device=None):
         """Returns an initial object estimate used in reconstruction algorithms. By default, this is a tensor of ones with the same shape as the object metadata.
@@ -137,6 +141,10 @@ class SPECTSystemMatrix(SystemMatrix):
         angle_indices = torch.arange(N_angles).to(pytomography.device) if subset_idx is None else angle_subset
         # Start projection
         object = object.to(pytomography.device)
+        object_test = pad_object(object)
+        if self.scatter_model is not None:
+            self.scatter_model.prepare_iteration(object_test)
+
         proj = torch.zeros(
             (N_angles,*self.proj_meta.padded_shape[1:])
             ).to(pytomography.device)
@@ -147,6 +155,23 @@ class SPECTSystemMatrix(SystemMatrix):
             object_i = pad_object(object)
             # beta = 270 - phi, and backward transform called because projection should be at +beta (requires inverse rotation of object)
             object_i = self.rotation_transform.backward(object_i, 270-self.proj_meta.angles[angle_indices_i])
+            if self.scatter_model is not None:
+                attenuation_map = pad_object(self.scatter_model.attenuation_map)
+                attenuation_map = self.rotation_transform.backward(
+                    attenuation_map, 
+                    270 - self.proj_meta.angles[angle_indices_i]
+                )
+                rho_i = self.scatter_model.get_relative_electron_density(attenuation_map=attenuation_map)
+                tau_i = self.scatter_model.get_depth_map(attenuation_map=attenuation_map)
+                
+                # Effective scatter source calculation (Eq. 9 of Frey)
+                a_s = self.scatter_model.get_effective_source(
+                rho=rho_i,
+                tau=tau_i,                                              #todo: peut être vérifier les rotations, en choisir plus explicite ?
+                rotation_transform=self.rotation_transform,
+                angle=self.proj_meta.angles[angle_indices_i]
+                )
+                object_i = object_i + a_s
             # Apply object 2 object transforms
             for transform in self.obj2obj_transforms:
                 object_i = transform.forward(object_i, angle_indices_i)
@@ -184,6 +209,10 @@ class SPECTSystemMatrix(SystemMatrix):
             proj = transform.backward(proj)
         # Setup for back projection
         object = torch.zeros(self.object_meta.padded_shape).to(pytomography.device)
+        if self.scatter_model is not None:
+            V1 = torch.zeros_like(object)   
+            V2 = torch.zeros_like(object)
+            V3 = torch.zeros_like(object)
         for i in range(0, len(angle_indices)):
             angle_indices_i = angle_indices[i]
             # Perform back projection
@@ -191,10 +220,24 @@ class SPECTSystemMatrix(SystemMatrix):
             # Apply object mappings
             for transform in self.obj2obj_transforms[::-1]:
                 object_i  = transform.backward(object_i, angle_indices_i)
+            if self.scatter_model is not None:
+                att_map_i = self.rotation_transform.backward(pad_object(self.scatter_model.attenuation_map), 270-self.proj_meta.angles[angle_indices_i])
+                # rho_i = att_map_i / self.scatter_model.mu_water
+                # tau_i = torch.cumsum(att_map_i, dim=0) * self.object_meta.dx
+                rho_i = self.scatter_model.get_relative_electron_density(att_map_i)
+                tau_i = self.scatter_model.get_depth_map(att_map_i)
+                
+                # Pondération de l'erreur par la géométrie (dans le repère tourné)
+                # Puis rotation vers le repère objet (forward) et accumulation
+                V1 += self.rotation_transform.forward(object_i * rho_i, 270 - self.proj_meta.angles[angle_indices_i])
+                V2 += self.rotation_transform.forward(object_i * rho_i * tau_i, 270 - self.proj_meta.angles[angle_indices_i])
+                V3 += self.rotation_transform.forward(object_i * rho_i * 0.5 * tau_i**2, 270 - self.proj_meta.angles[angle_indices_i])
             # Rotate all objects by by their respective angle
             object_i = self.rotation_transform.forward(object_i, 270-self.proj_meta.angles[angle_indices_i])
             # Add to total 
             object += object_i
+        if self.scatter_model is not None:
+            object += self.scatter_model.apply_adjoint(V1, V2, V3)
         # Unpad
         object = unpad_object(object)
         return object
