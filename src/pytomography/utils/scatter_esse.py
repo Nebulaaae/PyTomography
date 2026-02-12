@@ -31,7 +31,7 @@ class ESSEScatterModel:
             object_meta (SPECTObjectMeta): Métadonnées de l'objet SPECT.
         """
         self.object_meta = object_meta
-        self.attenuation_map = attenuation_map
+        self.attenuation_map = attenuation_map.to(pytomography.device)
         self.energy = energy
         self.mu_water = mu_water
         self.CGSM = CGSM
@@ -47,7 +47,7 @@ class ESSEScatterModel:
             
             # Calcul de la FFT sur le noyau
             k_shifted = torch.fft.ifftshift(k)
-            k_fft = torch.fft.rfftn(k_shifted, dim=(-3, -2, -1))
+            k_fft = torch.fft.rfftn(k_shifted, dim=(-3, -2, -1)).to(pytomography.device)
             self.kernels_fft.append(k_fft)
 
 
