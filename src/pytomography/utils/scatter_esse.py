@@ -36,22 +36,32 @@ class ESSEScatterModel:
         self.mu_water = mu_water
         self.CGSM = CGSM
 
-        self.kernels_fft = []
+        # self.kernels_fft = []
         
+        # for i in range(kernels.shape[0]):
+        #     k = kernels[i]
+            
+        #     if self.CGSM and self.CGSM > 1:
+        #         k = self.CGSM_collapse(self.CGSM, k)
+        #         # todo : l'article propose de diviser les kernels en deux, pour la partie basse résolution et la partie haute résolution. À voir.
+            
+        #     # Calcul de la FFT sur le noyau
+        #     k_shifted = torch.fft.ifftshift(k)
+        #     k_fft = torch.fft.rfftn(k_shifted, dim=(-3, -2, -1))
+        #     self.kernels_fft.append(k_fft)
+        self.fft_shape = [dim * 2 for dim in (self.CGSM_collapse(self.CGSM, kernels[0]).shape if (self.CGSM and self.CGSM > 1) else kernels[0].shape)]
+        
+        processed_kernels = []
         for i in range(kernels.shape[0]):
             k = kernels[i]
-            
             if self.CGSM and self.CGSM > 1:
                 k = self.CGSM_collapse(self.CGSM, k)
-                # todo : l'article propose de diviser les kernels en deux, pour la partie basse résolution et la partie haute résolution. À voir.
             
-            # Calcul de la FFT sur le noyau
             k_shifted = torch.fft.ifftshift(k)
-            k_fft = torch.fft.rfftn(k_shifted, dim=(-3, -2, -1))
-            self.kernels_fft.append(k_fft)
-
-
-
+            processed_kernels.append(torch.fft.rfftn(k_shifted, s=self.fft_shape, dim=(-3, -2, -1)))
+        
+        self.kernels_fft = torch.stack(processed_kernels)
+        
     def get_relative_electron_density(
         self,
         attenuation_map: torch.Tensor,
@@ -129,22 +139,38 @@ class ESSEScatterModel:
         
         return expanded.squeeze(0).squeeze(0)
 
+    # def prepare_iteration(self, object_3d): #todo: ajouter commentaires
+    #     """
+        
+    #     """
+    #     obj = object_3d
+    #     if self.CGSM and self.CGSM > 1:
+    #         obj = self.CGSM_collapse(self.CGSM, obj)
+            
+    #     obj_fft = torch.fft.rfftn(obj)
+    #     I1 = torch.fft.irfftn(obj_fft * self.kernels_fft[0], s=obj.shape)
+    #     I2 = torch.fft.irfftn(obj_fft * self.kernels_fft[1], s=obj.shape)
+    #     I3 = torch.fft.irfftn(obj_fft * self.kernels_fft[2], s=obj.shape)
+    #     self.convolved_volumes = [I1, I2, I3]
+
     def prepare_iteration(self, object_3d): #todo: ajouter commentaires
         """
         
         """
-        obj = object_3d
         if self.CGSM and self.CGSM > 1:
-            obj = self.CGSM_collapse(self.CGSM, obj)
-            
-        obj_fft = torch.fft.rfftn(obj)
-        I1 = torch.fft.irfftn(obj_fft * self.kernels_fft[0], s=obj.shape)
-        I2 = torch.fft.irfftn(obj_fft * self.kernels_fft[1], s=obj.shape)
-        I3 = torch.fft.irfftn(obj_fft * self.kernels_fft[2], s=obj.shape)
-        
-        self.convolved_volumes = [I1, I2, I3]
+            object_3d = self.CGSM_collapse(self.CGSM, object_3d)
+        # obj_fft = torch.fft.rfftn(object_3d)
+        # convolved_fft = obj_fft.unsqueeze(0) * self.kernels_fft
+        # self.convolved_volumes = torch.fft.irfftn(convolved_fft, s=object_3d.shape, dim=(-3, -2, -1))
+        img_shape = object_3d.shape
+        fft_shape = [img_shape[i] * 2 for i in range(len(img_shape))] 
+        obj_fft = torch.fft.rfftn(object_3d, s=fft_shape)
+        convolved_fft = obj_fft.unsqueeze(0) * self.kernels_fft
+        full_conv = torch.fft.irfftn(convolved_fft, s=fft_shape, dim=(-3, -2, -1))
+        self.convolved_volumes = full_conv[..., :img_shape[0], :img_shape[1], :img_shape[2]]
 
     def get_effective_source(self, rho, tau, rotation_transform, angle): #todo: ajouter commentaires
+        #todo : regarder la question du zero padding pour éviter les effets de repliement
         """
             
         
@@ -173,16 +199,22 @@ class ESSEScatterModel:
             V2 = self.CGSM_collapse(self.CGSM, V2)
             V3 = self.CGSM_collapse(self.CGSM, V3)
         
-        V1_fft = torch.fft.rfftn(V1)
-        V2_fft = torch.fft.rfftn(V2)
-        V3_fft = torch.fft.rfftn(V3)
+        v_shape = V1.shape
         
-        S1 = torch.fft.irfftn(V1_fft * torch.conj(self.kernels_fft[0]), s=V1.shape)
-        S2 = torch.fft.irfftn(V2_fft * torch.conj(self.kernels_fft[1]), s=V2.shape)
-        S3 = torch.fft.irfftn(V3_fft * torch.conj(self.kernels_fft[2]), s=V3.shape)
+        V1_fft = torch.fft.rfftn(V1, s=self.fft_shape)
+        V2_fft = torch.fft.rfftn(V2, s=self.fft_shape)
+        V3_fft = torch.fft.rfftn(V3, s=self.fft_shape)
+        
+        S1 = torch.fft.irfftn(V1_fft * torch.conj(self.kernels_fft[0]), s=self.fft_shape)
+        S2 = torch.fft.irfftn(V2_fft * torch.conj(self.kernels_fft[1]), s=self.fft_shape)
+        S3 = torch.fft.irfftn(V3_fft * torch.conj(self.kernels_fft[2]), s=self.fft_shape)
+
+        S1 = S1[..., :v_shape[0], :v_shape[1], :v_shape[2]]
+        S2 = S2[..., :v_shape[0], :v_shape[1], :v_shape[2]]
+        S3 = S3[..., :v_shape[0], :v_shape[1], :v_shape[2]]
 
         S = S1 - S2 + S3
 
-        if self.CGSM:
+        if self.CGSM and self.CGSM > 1:
             S = self.CGSM_expand(S, self.object_meta.padded_shape)
         return S

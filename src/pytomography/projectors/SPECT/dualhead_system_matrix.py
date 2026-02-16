@@ -167,7 +167,7 @@ class SPECTSystemMatrix(SystemMatrix):
                 # Effective scatter source calculation (Eq. 9 of Frey)
                 a_s = self.scatter_model.get_effective_source(
                 rho=rho_i,
-                tau=tau_i,                                              #todo: peut être vérifier les rotations, en choisir plus explicite ?
+                tau=tau_i,                                              #todo: peut être vérifier les rotations ?
                 rotation_transform=self.rotation_transform,
                 angle=self.proj_meta.angles[angle_indices_i]
                 )
