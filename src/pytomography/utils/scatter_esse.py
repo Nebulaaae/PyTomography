@@ -155,7 +155,7 @@ class ESSEScatterModel:
 
     def prepare_iteration(self, object_3d): #todo: ajouter commentaires
         """
-        
+            Generate the necessary convolved volumes for the current iteration, applying CGSM if needed.
         """
         if self.CGSM and self.CGSM > 1:
             object_3d = self.CGSM_collapse(self.CGSM, object_3d)
@@ -172,8 +172,7 @@ class ESSEScatterModel:
     def get_effective_source(self, rho, tau, rotation_transform, angle): #todo: ajouter commentaires
         #todo : regarder la question du zero padding pour éviter les effets de repliement
         """
-            
-        
+            Calculate the effective scatter source term for the current angle, using the pre-convolved volumes and applying the necessary rotations and CGSM expansions. Used in forward projection.
         """
         # Rotation des volumes pré-calculés vers l'angle actuel
         I_rot = []
@@ -192,7 +191,7 @@ class ESSEScatterModel:
     
     def apply_adjoint(self, V1: torch.Tensor, V2: torch.Tensor, V3: torch.Tensor) -> torch.Tensor:
         """
-    
+            Apply the adjoint operation to the convolved volumes V1, V2, V3. Used in backward projection.
         """
         if self.CGSM and self.CGSM > 1:
             V1 = self.CGSM_collapse(self.CGSM, V1)
