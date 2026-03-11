@@ -7,3 +7,4 @@ stir_testing
 dist/
 test_files
 *docs/build*
+.venv/
