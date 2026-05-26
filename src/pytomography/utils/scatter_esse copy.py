@@ -153,45 +153,39 @@ class ESSEScatterModel:
     #     I3 = torch.fft.irfftn(obj_fft * self.kernels_fft[2], s=obj.shape)
     #     self.convolved_volumes = [I1, I2, I3]
 
-    def prepare_iteration(self, object_3d):
+    def prepare_iteration(self, object_3d): #todo: ajouter commentaires
         """
-        Stocke uniquement l'objet de l'itération courante sans pré-calculer de convolution.
+            Generate the necessary convolved volumes for the current iteration, applying CGSM if needed.
         """
-        self.current_object = object_3d
-
-    def get_effective_source(self, rho, tau, rotation_transform, angle):
-        """
-        Calcule le terme source de diffusé en effectuant la convolution après la rotation.
-        """
-        # 1. Rotation de l'objet d'activité dans le repère du détecteur
-        rotated_obj = rotation_transform.backward(self.current_object, 270 - angle) 
-        
-        # 2. Réduction d'échelle (CGSM) si activée
         if self.CGSM and self.CGSM > 1:
-            rotated_obj = self.CGSM_collapse(self.CGSM, rotated_obj)
-            
-        img_shape = rotated_obj.shape
+            object_3d = self.CGSM_collapse(self.CGSM, object_3d)
+        # obj_fft = torch.fft.rfftn(object_3d)
+        # convolved_fft = obj_fft.unsqueeze(0) * self.kernels_fft
+        # self.convolved_volumes = torch.fft.irfftn(convolved_fft, s=object_3d.shape, dim=(-3, -2, -1))
+        img_shape = object_3d.shape
         fft_shape = [img_shape[i] * 2 for i in range(len(img_shape))] 
-        
-        # 3. Convolution FFT 3D locale à cet angle
-        obj_fft = torch.fft.rfftn(rotated_obj, s=fft_shape)
+        obj_fft = torch.fft.rfftn(object_3d, s=fft_shape)
         convolved_fft = obj_fft.unsqueeze(0) * self.kernels_fft
         full_conv = torch.fft.irfftn(convolved_fft, s=fft_shape, dim=(-3, -2, -1))
-        
-        I1 = full_conv[0, :img_shape[0], :img_shape[1], :img_shape[2]]
-        I2 = full_conv[1, :img_shape[0], :img_shape[1], :img_shape[2]]
-        I3 = full_conv[2, :img_shape[0], :img_shape[1], :img_shape[2]]
-        
-        # 4. Expansion (CGSM) vers la taille d'origine du volume projeté
-        if self.CGSM and self.CGSM > 1:
-            I1 = self.CGSM_expand(I1, self.object_meta.padded_shape)
-            I2 = self.CGSM_expand(I2, self.object_meta.padded_shape)
-            I3 = self.CGSM_expand(I3, self.object_meta.padded_shape)
+        self.convolved_volumes = full_conv[..., :img_shape[0], :img_shape[1], :img_shape[2]]
+
+    def get_effective_source(self, rho, tau, rotation_transform, angle): #todo: ajouter commentaires
+        #todo : regarder la question du zero padding pour éviter les effets de repliement
+        """
+            Calculate the effective scatter source term for the current angle, using the pre-convolved volumes and applying the necessary rotations and CGSM expansions. Used in forward projection.
+        """
+        # Rotation des volumes pré-calculés vers l'angle actuel
+        I_rot = []
+        for vol in self.convolved_volumes:
+            rotated_vol = rotation_transform.backward(vol, 270 - angle) 
+            if self.CGSM and self.CGSM > 1:
+                rotated_vol = self.CGSM_expand(rotated_vol, self.object_meta.padded_shape)
+            I_rot.append(rotated_vol)
             
-        # 5. Évaluation de la formulation analytique (Eq. 9)
-        term1 = I1
-        term2 = I2 * tau
-        term3 = 0.5 * I3 * (tau ** 2)
+        # Equation 9 Frey et Tsui 1996
+        term1 = I_rot[0]
+        term2 = I_rot[1] * tau
+        term3 = 0.5 * I_rot[2] * (tau ** 2)
         
         return rho * (term1 - term2 + term3)
     
